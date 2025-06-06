@@ -43,30 +43,21 @@ class GLPIClient:
         """
         console.print(f"Tentative d'ouverture de session sur {self.api_url}...")
         
-        # Le endpoint pour l'authentification
         endpoint = "initSession"
         url = self.api_url + endpoint
 
-        # --- DÉBUT DE LA CORRECTION ---
-        # L'API GLPI attend les clés "login" et "password", et non "user_login"
         auth_payload = {
             "login": self._config_data['user_login'],
             "password": self._config_data['user_password']
         }
-        # --- FIN DE LA CORRECTION ---
         
         try:
-            # On utilise les headers sans session_token pour cette requête spécifique
             headers_for_auth = {
                 'Content-Type': 'application/json',
                 'App-Token': self.app_token
             }
-            # L'API GLPI v10+ a changé la méthode pour GET. On essaie POST puis GET.
-            # On va d'abord tenter avec POST, qui est plus commun pour le login.
             response = requests.post(url, headers=headers_for_auth, json=auth_payload, timeout=10)
             
-            # Si POST échoue avec une erreur de méthode non autorisée (405), on tente GET
-            # C'est une des subtilités de GLPI v10.
             if response.status_code == 405:
                 console.print("[yellow]POST non autorisé, tentative avec GET...[/yellow]")
                 headers_for_auth_get = headers_for_auth.copy()
@@ -76,8 +67,6 @@ class GLPIClient:
                 })
                 response = requests.get(url, headers=headers_for_auth_get, timeout=10)
 
-
-            # Lève une exception si le statut est une erreur (4xx ou 5xx)
             response.raise_for_status()
             
             data = response.json()
@@ -87,7 +76,6 @@ class GLPIClient:
                 console.print("[bold red]Erreur: session_token non reçu de GLPI.[/bold red]")
                 return False
             
-            # On met à jour le token dans notre config et on la sauvegarde
             self._config_data['session_token'] = self.session_token
             config.save_config(self._config_data)
 
@@ -114,7 +102,6 @@ class GLPIClient:
             response = requests.post(url, headers=self._get_headers(), timeout=10)
             response.raise_for_status()
 
-            # On nettoie le token dans notre config
             self._config_data['session_token'] = None
             self.session_token = None
             config.save_config(self._config_data)
@@ -124,3 +111,62 @@ class GLPIClient:
         except requests.exceptions.RequestException as e:
             console.print(f"[bold red]Erreur lors de la fermeture de la session: {e}[/bold red]")
             return False
+
+    # --- NOUVELLE MÉTHODE --- (EN FAIT, C'EST LA VERSION CORRIGÉE)
+    def search_by_name(self, item_name: str) -> dict | None:
+        """
+        Recherche un équipement par son nom exact dans plusieurs types d'items GLPI.
+        
+        Args:
+            item_name: Le nom exact de l'équipement à rechercher.
+
+        Returns:
+            Le premier item trouvé sous forme de dictionnaire, ou None si non trouvé.
+        """
+        if not self.session_token:
+            console.print("[bold red]Erreur: Aucune session active. Veuillez vous connecter d'abord.[/bold red]")
+            return None
+
+        item_types_to_search = ['Computer', 'NetworkEquipment', 'PassiveDevice', 'Cable']
+        
+        console.print(f"Recherche de '{item_name}' dans GLPI...")
+        
+        for item_type in item_types_to_search:
+            url = self.api_url + item_type
+            
+            # --- DÉBUT DE LA CORRECTION ---
+            # Utilisation de la syntaxe de recherche simplifiée, plus fiable.
+            # search[<champ>] est souvent mieux interprété par GLPI.
+            params = {
+                f'search[name]': item_name,
+                'forcedisplay[0]': 'itemtype'
+            }
+            # --- FIN DE LA CORRECTION ---
+            
+            try:
+                response = requests.get(url, headers=self._get_headers(), params=params, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                
+                if data:
+                    # --- DÉBUT DE LA VÉRIFICATION SUPPLÉMENTAIRE ---
+                    # L'API peut retourner tous les items si le filtre échoue.
+                    # On doit donc vérifier manuellement que le résultat est correct.
+                    for item in data:
+                        if item.get('name') == item_name:
+                            # On a trouvé la correspondance exacte !
+                            console.print(f"[green]'{item_name}' trouvé (type: {item_type}).[/green]")
+                            if 'itemtype' not in item:
+                                item['itemtype'] = item_type
+                            return item
+                    # Si on sort de la boucle, c'est que l'API a retourné des résultats
+                    # mais aucun ne correspond exactement. On continue la recherche.
+                    
+                # Si data est vide ou si aucun item ne correspondait, la recherche dans ce type d'objet a échoué.
+
+            except requests.exceptions.RequestException as e:
+                console.print(f"[bold red]Erreur lors de la recherche dans {item_type}: {e}[/bold red]")
+                return None
+        
+        console.print(f"[yellow]Aucun équipement nommé '{item_name}' n'a été trouvé.[/yellow]")
+        return None
